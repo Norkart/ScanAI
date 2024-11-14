@@ -25,7 +25,7 @@ SCANAI explores various segmentation methods to identify the best approach for c
 
 ### Segment Anything Model 2 (SAM2)
 
-- **Parameter Adjustment**: SAM2 outperforms SAM1 when parameters are fine-tuned.
+- **SAM2**: SAM2 outperforms SAM1 when parameters are fine-tuned.
 - *Additional notes:*
     - Requires tuning for optimal results
     - Fine-tuning reveals potential for superior segmentation accuracy
