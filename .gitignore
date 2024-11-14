@@ -1,0 +1,5 @@
+/datasets
+*.pt
+*.pth
+sam/models/
+sam2/models/

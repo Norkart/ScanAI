@@ -1,1 +1,7 @@
 opencv-python
+torch
+matplotlib
+PIL
+hydra
+streamlit
+streamlit_drawable_canvas
