@@ -1,0 +1,6 @@
+{
+    "jupyter.jupyterServerType": "remote",
+    "jupyter.remoteUrl": "https://fe.uia.no/user/siverteh?token=84272baac6584cfaab79d445e73b2db1",
+    "remote.SSH.defaultRemoteShell": "/bin/bash",
+    "remote.SSH.serverInstallPath": "/tmp/vscode-server"
+}
