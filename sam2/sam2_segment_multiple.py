@@ -1,4 +1,9 @@
 import os
+# Set environment variables for CUDA settings
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Use only GPU 0
+os.environ['CUDA_MANAGED_FORCE_DEVICE_ALLOC'] = '1'  # Enable unified memory
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
 import cv2
 import numpy as np
 import torch
@@ -6,10 +11,11 @@ from hydra import initialize
 from hydra.core.global_hydra import GlobalHydra
 from sam2.build_sam import build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, MultiPolygon
 from supervision.draw.color import Color, ColorPalette
 import supervision as sv
 from pdf2image import convert_from_path  # For PDF processing
+from torch.cuda.amp import autocast
 
 # --- Configuration ---
 
@@ -27,11 +33,11 @@ os.makedirs(output_folder_fokus, exist_ok=True)
 os.makedirs(output_folder_utfordring, exist_ok=True)
 
 # Paths to configuration and checkpoint files
-config_file_path = './sam2.1_hiera_l.yaml'      # Adjust if necessary
-checkpoint_file_path = './sam2.1_hiera_large.pt'  # Adjust if necessary
+#config_file_path = './sam2.1_hiera_l.yaml'      
+#checkpoint_file_path = './sam2.1_hiera_large.pt' 
 
-# Resize percentage
-scale_percent = 15  # Adjust as needed
+config_file_path = './sam2.1_hiera_b+.yaml'     
+checkpoint_file_path = './sam2.1_hiera_base_plus.pt' 
 
 # Device configuration
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -47,20 +53,20 @@ with initialize(config_path="."):
 mask_generator = SAM2AutomaticMaskGenerator(
     model=sam2_model,
     points_per_side=64,
-    points_per_batch=64,
-    pred_iou_thresh=0.8,
-    stability_score_thresh=0.9,
+    points_per_batch=16,
+    pred_iou_thresh=0.0,
+    stability_score_thresh=0.85,
     stability_score_offset=1.0,
     mask_threshold=0.0,
-    box_nms_thresh=1,
+    box_nms_thresh=1,           
     crop_n_layers=1,
     crop_nms_thresh=0.7,
-    crop_overlap_ratio=0.2,
+    crop_overlap_ratio=0.2,        
     crop_n_points_downscale_factor=1,
     point_grids=None,
     min_mask_region_area=0,
     output_mode="binary_mask",
-    use_m2m=True,
+    use_m2m=True,                  
     multimask_output=False
 )
 
@@ -135,14 +141,12 @@ def process_image(image_path, output_path_base):
 
     page_num = 1
     for image_bgr in image_bgr_list:
-        # Resize the image
-        width = int(image_bgr.shape[1] * scale_percent / 100)
-        height = int(image_bgr.shape[0] * scale_percent / 100)
-        image_bgr = cv2.resize(image_bgr, (width, height), interpolation=cv2.INTER_AREA)
+
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
         # Generate masks
-        sam_result = mask_generator.generate(image_rgb)
+        with autocast():
+            sam_result = mask_generator.generate(image_rgb)
 
         # Filter masks to remove smaller masks inside larger ones
         # Step 1: Extract masks and compute area for sorting
@@ -198,97 +202,133 @@ def process_image(image_path, output_path_base):
         # Create a filtered sam_result
         filtered_sam_result = [sam_result[idx] for idx, _, _ in filtered_masks_with_areas]
 
-        # Get the sorted masks
-        sorted_masks = [mask['segmentation'] for mask in filtered_sam_result]
-
-        # Generate ColorPalette with BGR colors based on sorted mask order
-        sorted_mask_colors = [
-            Color.from_bgr_tuple(get_most_common_color(image_bgr, mask)) for mask in sorted_masks
-        ]
-        custom_color_palette = ColorPalette(colors=sorted_mask_colors)
-
-        # Convert filtered SAM result to detections and annotate using the sorted colors
-        detections = sv.Detections.from_sam(sam_result=filtered_sam_result)
-        mask_annotator = sv.MaskAnnotator(color=custom_color_palette, opacity=0.9)
-
-        # Create a custom color lookup array based on sorted colors
-        custom_color_lookup = np.arange(len(sorted_mask_colors))
-
-        try:
-            # Annotate the image with the custom color palette in BGR
-            annotated_image_with_custom_colors = mask_annotator.annotate(
-                scene=image_bgr.copy(),
-                detections=detections,
-                custom_color_lookup=custom_color_lookup
-            )
-        except Exception as e:
-            print(f"Error during annotation: {e}")
-            continue
-
-        # --- Generate and Overlay Vectorized Polygons with Adjusted Filtering ---
-
         polygons_list = []
+
         # Prepare a copy of the original image for drawing polygons
         image_with_polygons = image_bgr.copy()
-
+        
+        # Image area
+        image_area = image_bgr.shape[0] * image_bgr.shape[1]
+        
         # List to store polygons with their area
         mask_polygons = []
-
+        
+        # Function to smooth contour using moving average
+        def smooth_contour(contour, window_size=5):
+            # Ensure window_size is odd
+            if window_size % 2 == 0:
+                window_size += 1
+            half_window = window_size // 2
+        
+            # Pad the contour to handle the circular nature
+            contour = np.concatenate((contour[-half_window:], contour, contour[:half_window]), axis=0)
+            
+            smoothed_contour = []
+            for i in range(half_window, len(contour) - half_window):
+                window_points = contour[i - half_window:i + half_window + 1]
+                mean_point = np.mean(window_points, axis=0)
+                smoothed_contour.append(mean_point)
+            smoothed_contour = np.array(smoothed_contour, dtype=np.int32)
+            return smoothed_contour
+        
         # Loop over each mask in the filtered SAM result
         for idx, mask_dict in enumerate(filtered_sam_result):
-            mask = mask_dict['segmentation'].astype(np.uint8)
-
+            mask = mask_dict['segmentation'].astype(np.uint8)  # Ensure mask is in uint8 format
+        
             # Find contours in the mask
-            contours, hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
+            contours, hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        
+            # Skip if no contours are found
             if not contours:
                 continue
-
-            # Approximate contours to polygons and store them
+        
+            # Process each contour
             for contour in contours:
-                # Simplify the contour
-                epsilon = 0.005 * cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, epsilon, True)
-
-                if len(approx) >= 3:
-                    coords = approx.reshape(-1, 2)
-                    polygon = Polygon(coords)
+                if contour.shape[0] < 5:
+                    continue  # Need at least 5 points to smooth
+        
+                # Reshape contour to 2D array
+                contour = contour.reshape(-1, 2)
+        
+                # Smooth the contour using moving average
+                smoothed_contour = smooth_contour(contour, window_size=15)  # Adjust window_size as needed
+        
+                if smoothed_contour.shape[0] >= 3:
+                    polygon = Polygon(smoothed_contour)
+                    # Ensure the polygon is valid
                     if not polygon.is_valid or polygon.area == 0:
-                        continue
-                    mask_polygons.append({'area': polygon.area, 'polygon': polygon})
-
-        # Exclude large masks covering most of the image
-        max_area_threshold = 0.9 * image_area
+                        # Try fixing invalid polygons
+                        polygon = polygon.buffer(0)
+                        if not polygon.is_valid or polygon.area == 0:
+                            continue  # Skip if still invalid
+                    # Store the polygon along with its area and index
+                    mask_polygons.append({'area': polygon.area, 'polygon': polygon, 'index': idx})
+        
+        # Introduce max_area_threshold to exclude overly large polygons
+        max_area_threshold = 0.9 * image_area  # Exclude polygons covering more than 90% of the image
+        
+        # Filter out masks that are too large
         mask_polygons = [mp for mp in mask_polygons if mp['area'] < max_area_threshold]
-
-        # Filter out smaller polygons inside larger ones
+        
+        # Debug: Print the number of polygons after excluding large masks
+        print(f"Total polygons after excluding large masks: {len(mask_polygons)}")
+        
+        # Now, filter out smaller polygons that are mostly within larger ones
+        # Sort polygons by area in descending order
         mask_polygons.sort(key=lambda x: x['area'], reverse=True)
+        
+        # Initialize list to hold the final polygons
         filtered_polygons = []
-
-        for poly_dict in mask_polygons:
+        
+        # Function to check if a polygon is mostly within existing polygons
+        def is_polygon_mostly_within(poly, existing_polys, area_overlap_threshold=0.95):
+            for existing_poly in existing_polys:
+                intersection_area = poly.intersection(existing_poly).area
+                if poly.area == 0:
+                    continue
+                overlap_ratio = intersection_area / poly.area
+                if overlap_ratio >= area_overlap_threshold:
+                    return True
+            return False
+        
+        # Process each polygon
+        for idx, poly_dict in enumerate(mask_polygons):
             poly = poly_dict['polygon']
-            if poly.area >= max_area_threshold:
-                continue
-            if not is_polygon_mostly_within(poly, [d['polygon'] for d in filtered_polygons], area_overlap_threshold=0.95):
+            if not is_polygon_mostly_within(poly, [d['polygon'] for d in filtered_polygons], area_overlap_threshold=0.2):
                 filtered_polygons.append(poly_dict)
-
+            else:
+                print(f"Polygon {idx} is mostly within another polygon and will be removed.")
+        
+        # Debug: Print the number of polygons after filtering
+        print(f"Total polygons after overlap filtering: {len(filtered_polygons)}")
+        
         # Draw the filtered polygons on the image
         for poly_dict in filtered_polygons:
             poly = poly_dict['polygon']
-            coords = np.array(list(poly.exterior.coords)).astype(np.int32)
-            cv2.polylines(image_with_polygons, [coords], isClosed=True, color=(0, 255, 0), thickness=2)
-            polygons_list.append(poly)
+            if isinstance(poly, Polygon):
+                # Handle single Polygon
+                coords = np.array(list(poly.exterior.coords)).astype(np.int32)
+                cv2.polylines(image_with_polygons, [coords], isClosed=True, color=(0, 255, 0), thickness=5)
+                polygons_list.append(poly)
+            elif isinstance(poly, MultiPolygon):
+                # Handle MultiPolygon
+                for sub_poly in poly.geoms:
+                    if sub_poly.is_valid and not sub_poly.is_empty:
+                        coords = np.array(list(sub_poly.exterior.coords)).astype(np.int32)
+                        cv2.polylines(image_with_polygons, [coords], isClosed=True, color=(0, 255, 0), thickness=5)
+                        polygons_list.append(sub_poly)
+        
+            # Save the image with polygons
+            if len(image_bgr_list) > 1:
+                output_path = f"{output_path_base}_page{page_num}.png"
+            else:
+                output_path = f"{output_path_base}.png"
+            cv2.imwrite(output_path, image_with_polygons)
+            print(f"Saved polygonized image to {output_path}")
+            page_num += 1
 
-        # Save the image with polygons
-        if len(image_bgr_list) > 1:
-            output_path = f"{output_path_base}_page{page_num}.png"
-        else:
-            output_path = f"{output_path_base}.png"
-        cv2.imwrite(output_path, image_with_polygons)
-        print(f"Saved polygonized image to {output_path}")
-        page_num += 1
-
-# --- Main Processing ---
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
 
 def collect_image_paths(folder_path, max_images):
     image_extensions = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.pdf')
@@ -309,6 +349,8 @@ def collect_image_paths(folder_path, max_images):
 folder1_images = collect_image_paths(folder1_path, max_images=25)
 for image_path in folder1_images:
     filename = os.path.basename(image_path)
+    if filename == "240.jpg":
+        continue
     filename_base, _ = os.path.splitext(filename)
     # Update output path to save into 'fokus' subfolder
     output_path_base = os.path.join(output_folder_fokus, f"polygonized_{filename_base}")
