@@ -5,9 +5,11 @@
 ## Project Overview
 SCANAI explores various segmentation methods to identify the best approach for converting hand-marked map images into structured, vectorized data.
 
-## Methods Explored
+## Segmentation Methods Explored
 
-### Segment Anything Model (SAM)
+### Segment Anything Model's
+
+#### Segment Anything Model (SAM)
 
 - **SAM1**: Provides the best out-of-the-box performance for segmentation tasks.
 - **Coordinate Prompting with SAM**: Highest precision but can only process one region at a time.
@@ -23,7 +25,7 @@ SCANAI explores various segmentation methods to identify the best approach for c
         - Captured click coordinates to input into SAM's predictor.
         - Applied single-point prompts to generate individual mask regions.
 
-### Segment Anything Model 2 (SAM2)
+#### Segment Anything Model 2 (SAM2)
 
 - **SAM2**: SAM2 outperforms SAM1 when parameters are fine-tuned.
 - *Additional notes:*
@@ -50,8 +52,26 @@ SCANAI explores various segmentation methods to identify the best approach for c
             - `use_m2m=True`: Enables mask-to-mask refinement, improving mask accuracy.
             - `multimask_output=False`: Outputs a single mask per region, ensuring only the best mask per prompt.
 
+#### SAMGEO
 
-### Standard OpenCV Techniques
+##### SAMGEO Automatic
+- Gives similar results as standard SAM
+
+##### SAMGEO Automatic HQ
+- The High Quality SAMGEO model does not seem to give any noticable better performance than standard SAMGEO
+- Takes more time to process and segment map images. 
+
+##### SAMGEO2 Automatic
+- SAMGEO2 seems to give more accurate masks on certain map areas than SAM2
+- Struggles to segment cetrain large areas compared to SAM2
+- Still pretty good results and SAMGEO2 and SAM2 seems to be the contenders for the best automatic mask generators
+
+##### SAMGEO Language
+- SAMGEO with language prompting does not seem to give any good results on map images. Difficult to find a prompt for finding all the different areas in a map
+
+
+
+#### Standard OpenCV Techniques
 
 - **Standard Techniques**: OpenCV was tested for baseline segmentation but yielded less effective results.
 - *Additional notes:*
@@ -61,6 +81,37 @@ SCANAI explores various segmentation methods to identify the best approach for c
 - **Things Tried:**
     - Thresholding and edge detection
     - Contour detection
+
+
+## K-Means Image Clustering
+
+Used K-Means clustering with silhouette score to categorize images into meaningful clusters based on visual features. Pre-trained deep learning models were used to extract features from the images, and their performance was evaluated on different clustering configurations.
+
+### Steps
+1. Collect images and PDFs recursively; convert PDFs to images.
+2. Extract deep features using ResNet50.
+3. Reduce features to 50 dimensions with PCA.
+4. Find optimal clusters using silhouette scores (2–15 clusters).
+5. Cluster images with Agglomerative Clustering and save to directories.
+
+### Results
+- **DenseNet** showed the best performance on 3 clusters, clustering the dataset into **old maps**, **small areas**, and **large colorful maps**.
+- **ResNet** showed the best performance on 2 clusters, clustering the dataset into **old uncolored maps** and **new colorful maps**.
+
+The resulting clusters can be seen in [Excel sheet](https://docs.google.com/spreadsheets/d/1tYTSKLr1oZa4xqcuU85iRogTT5oW9OQQVPY2q-Be3T8/edit?gid=1974503951#gid=1974503951).
+
+## Vision Models Explored
+
+
+### GPT4-Turbo Vision
+
+
+
+### Azure AI Vision
+
+
+
+### YOLO
 
 
 ## Status and Key Findings
@@ -78,3 +129,5 @@ A critical discussion point is determining what level of segmentation accuracy i
 
 - **Georeferencing**: Testing segmentation methods with georeferenced maps to assess applicability in real-world spatial contexts.
 - **Refinement**: Exploring annotated datasets and fine-tuning to further enhance model performance.
+
+Extract all the area names and their associated colors. Give me the color code for each color both in RGB and hex.
