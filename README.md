@@ -133,6 +133,8 @@ Overall, Azure AI Vision is a promising tool for text extraction tasks, particul
 
 
 ### YOLO
+- Did not work well as YOLO is trained to detect certain objects like book, bench, etc, and does not have functionalities for detecting objects like color boxes in a map explanation. 
+- Would need fine tuning to work well and detect map and map explanation related objects.
 
 
 ## Status and Key Findings
