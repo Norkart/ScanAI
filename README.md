@@ -95,7 +95,7 @@ Used K-Means clustering with silhouette score to categorize images into meaningf
 5. Cluster images with Agglomerative Clustering and save to directories.
 
 ### Results
-- **DenseNet** showed the best performance on 3 clusters, clustering the dataset into **old maps**, **small areas**, and **large colorful maps**.
+- **Efficientnet** showed the best performance on 3 clusters, clustering the dataset into **old maps**, **small areas**, and **large colorful maps**.
 - **ResNet** showed the best performance on 2 clusters, clustering the dataset into **old uncolored maps** and **new colorful maps**.
 
 The resulting clusters can be seen in [Excel sheet](https://docs.google.com/spreadsheets/d/1tYTSKLr1oZa4xqcuU85iRogTT5oW9OQQVPY2q-Be3T8/edit?gid=1974503951#gid=1974503951).
@@ -105,10 +105,31 @@ The resulting clusters can be seen in [Excel sheet](https://docs.google.com/spre
 
 ### GPT4-Turbo Vision
 
+The GPT4-Turbo Vision model demonstrated mixed results when applied to map-related tasks:
 
+#### Unpromising Results:
+- **General OCR on Maps**: The model performed poorly in reading text directly from the maps. When prompted to extract all text from a map it would either say that it cannot do that, or hallucinate and say text that was not in the map at all.
+- **Area Detection**: It struggled to identify and distinguish the number of different areas present in the maps. When prompted to count the amount of areas of a certain color in a map it would give a different answer every time it was asked.
+- **Coordinate Extraction**: The model was unable to extract geographic coordinates from map images. It does not have the built in functionality to give image coordinates when prompted.
+
+#### Promising Results:
+- **Map Explanation/Legend Analysis**: The model showed potential in analyzing legend images, accurately identifying the connection between map area names and their corresponding color explanations. When prompted to give all area names and their associated colors in a map explanation/legend it would get all of them correct most of the time.
+
+Overall, while GPT4-Turbo Vision has significant limitations in core map-reading tasks, it shows promise in legend-based analysis.
 
 ### Azure AI Vision
 
+The Azure AI Vision model showed both strengths and limitations when applied to map-related tasks:
+
+#### Promising Results:
+- **Text Extraction**: Showed promise in extracting text from both map images and map explanation/legend images.
+- **Bounding Boxes**: Provide bounding boxes for the detected text, giving us the location of the text is within the image.
+
+#### Limitations:
+- **Small Text**: The model struggles to extract all text from map images, especially where small text is densely packed, limiting its effectiveness in highly detailed maps.
+- **Customization**: There is a lack of customization for the model and we cant change any thresholds for text extraction.
+
+Overall, Azure AI Vision is a promising tool for text extraction tasks, particularly when bounding box data is needed, though it may require supplemental methods for handling smaller text.
 
 
 ### YOLO

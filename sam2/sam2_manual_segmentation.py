@@ -2,120 +2,104 @@ import streamlit as st
 import cv2
 import numpy as np
 import torch
-from segment_anything import sam_model_registry, SamPredictor
 from streamlit_drawable_canvas import st_canvas
 from PIL import Image
 import os
+from shapely.geometry import MultiPolygon, Polygon
 
-# Set Streamlit layout to "wide" to see the entire image
+from sam2.sam2_image_predictor import SAM2ImagePredictor
+
 st.set_page_config(layout="wide")
 
-# Set device
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+model = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
 
-# Load SAM model
-# You can switch to 'vit_b' if you still have memory issues
-CHECKPOINT_PATH = "weights/sam_vit_l_0b3195.pth"
-MODEL_TYPE = "vit_l"
-
-model = sam_model_registry[MODEL_TYPE](checkpoint=CHECKPOINT_PATH)
-model.to(device)
-model.eval()  # Set model to evaluation mode
-
-# Function to save masks
 def save_masks_to_disk():
-    # Define base directories
     output_dir = "exported_masks"
     images_dir = os.path.join(output_dir, "images")
     masks_dir = os.path.join(output_dir, "masks")
     os.makedirs(images_dir, exist_ok=True)
     os.makedirs(masks_dir, exist_ok=True)
 
-    # Save the original image
     image_output_path = os.path.join(images_dir, "image.jpg")
     cv2.imwrite(image_output_path, map_image)
 
-    # Debug: Check if any masks are stored
     if not st.session_state["masks_list"]:
         st.error("No masks to save. Please annotate the image before exporting.")
         return
 
-    # Initialize an empty mask for the entire image
     height, width = map_image.shape[:2]
     combined_mask = np.zeros((height, width), dtype=np.uint8)
 
-    # Define label mapping starting from 1
     label_mapping = {label: idx+1 for idx, label in enumerate(labels)}
     st.write(f"Label mapping: {label_mapping}")
 
-    # Iterate over masks and combine them
     for idx, mask_info in enumerate(st.session_state["masks_list"]):
         mask = mask_info["mask"]
         label = mask_info["label"]
         class_id = label_mapping[label]
-
-        # Debug: Check mask content
         mask_sum = np.sum(mask)
         st.write(f"Mask {idx} for label '{label}' has sum: {mask_sum}")
-
-        # Update combined mask with the class ID
         combined_mask[mask > 0] = class_id
 
-    # Save the combined mask (for model training)
     mask_output_path = os.path.join(masks_dir, "mask.png")
     cv2.imwrite(mask_output_path, combined_mask)
 
-    # Save a scaled version of the combined mask for visualization
     max_class_id = max(label_mapping.values())
     scaling_factor = 255 // max_class_id
     scaled_mask = (combined_mask * scaling_factor).astype(np.uint8)
     scaled_mask_output_path = os.path.join(masks_dir, "mask_visualization.png")
     cv2.imwrite(scaled_mask_output_path, scaled_mask)
 
-    # Apply a color map for better visualization
     color_mask = cv2.applyColorMap(scaled_mask, cv2.COLORMAP_JET)
     color_mask_output_path = os.path.join(masks_dir, "mask_color.png")
     cv2.imwrite(color_mask_output_path, color_mask)
 
-    # Optionally, save the annotated image
     annotated_image_path = os.path.join(output_dir, "annotated_image.jpg")
     cv2.imwrite(annotated_image_path, st.session_state["annotated_image"])
 
 
-# Load map image and resize based on scaling
-map_image_path = "datasets/aalesund/1504200/200.jpg"
+# Contour smoothing function
+def smooth_contour(contour, window_size=5):
+    if window_size % 2 == 0:
+        window_size += 1
+    half_window = window_size // 2
+
+    contour = np.concatenate((contour[-half_window:], contour, contour[:half_window]), axis=0)
+    smoothed_contour = []
+    for i in range(half_window, len(contour) - half_window):
+        window_points = contour[i - half_window:i + half_window + 1]
+        mean_point = np.mean(window_points, axis=0)
+        smoothed_contour.append(mean_point)
+    smoothed_contour = np.array(smoothed_contour, dtype=np.int32)
+    return smoothed_contour
+
+map_image_path = "dataset/aalesund/FOKUS/1504201/201.jpg"
 map_image = cv2.imread(map_image_path)
-scale_percent = 10  # Adjust this value to change image size
+scale_percent = 10
 width = int(map_image.shape[1] * scale_percent / 100)
 height = int(map_image.shape[0] * scale_percent / 100)
 map_image = cv2.resize(map_image, (width, height), interpolation=cv2.INTER_AREA)
 
-# Initialize session state for masks and annotated image if not set
 if "masks_list" not in st.session_state:
     st.session_state["masks_list"] = []
 if "annotated_image" not in st.session_state:
     st.session_state["annotated_image"] = map_image.copy()
 
-# Add label selection in the sidebar
 labels = ["Residential Area", "Forest", "Shooting Range"]
 selected_label = st.sidebar.selectbox("Select Label for Next Mask", labels)
 
-# Button to reset masks
 if st.button("Reset Masks"):
-    st.session_state["masks_list"].clear()  # Remove all masks
-    st.session_state["annotated_image"] = map_image.copy()  # Reset annotated image
+    st.session_state["masks_list"].clear()
+    st.session_state["annotated_image"] = map_image.copy()
 
-# Button to export masks
 if st.button("Export Masks"):
     save_masks_to_disk()
     st.success("Masks have been exported successfully.")
 
-# Display the image on canvas if loaded
 if map_image is not None:
-    # Convert map_image to PIL format for st_canvas
     pil_image = Image.fromarray(cv2.cvtColor(map_image, cv2.COLOR_BGR2RGB))
 
-    # Display the image with a canvas to capture click coordinates
     canvas_result = st_canvas(
         fill_color="rgba(255, 165, 0, 0.3)",
         stroke_width=3,
@@ -128,63 +112,91 @@ if map_image is not None:
         key="canvas"
     )
 
-    # Check if a point was clicked
     if canvas_result.json_data and len(canvas_result.json_data["objects"]) > 0:
-        # Get the last clicked point
         x_coord = int(canvas_result.json_data["objects"][-1]["left"])
         y_coord = int(canvas_result.json_data["objects"][-1]["top"])
         st.write(f"Clicked coordinates: ({x_coord}, {y_coord})")
 
-        # Define input point for SAM
         input_point = np.array([[x_coord, y_coord]])
-        input_label = np.array([1])  # SAM expects a binary label; 1 means foreground
+        input_label = np.array([1])
 
-        # Use SamPredictor to set the image and predict the mask
-        predictor = SamPredictor(model)
-        predictor.set_image(map_image)
-
-        # Generate the mask from SAM with multimask_output argument
+        model.set_image(map_image)
         with torch.no_grad():
-            masks, scores, logits = predictor.predict(
+            masks, scores, logits = model.predict(
                 point_coords=input_point,
                 point_labels=input_label,
                 multimask_output=False
             )
 
-        # masks is a NumPy array of shape [num_masks, mask_height, mask_width]
-        # Resize mask to original image size
+        mask = masks[0]
         original_h, original_w = map_image.shape[:2]
-        mask = masks[0]  # Take the first mask, shape: (mask_height, mask_width)
-
-        # Resize mask using cv2
         mask_resized = cv2.resize(mask.astype(np.float32), (original_w, original_h), interpolation=cv2.INTER_NEAREST)
-        # Binarize the resized mask
         mask_resized = (mask_resized > 0).astype(np.uint8)
 
-        # Convert mask to uint8
-        mask_uint8 = (mask_resized * 255).astype(np.uint8)
-        mask_colored = cv2.applyColorMap(mask_uint8, cv2.COLORMAP_JET)
+        # Instead of coloring the mask, we now convert it to polygons and draw their outlines.
+        image_area = original_h * original_w
 
-        # Apply mask only on masked area
-        mask_overlay = st.session_state["annotated_image"].copy()
-        # Create a boolean mask
-        mask_bool = mask_resized.astype(bool)
+        # Find contours
+        contours, hierarchy = cv2.findContours(mask_resized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
-        # Apply the overlay
-        mask_overlay[mask_bool] = cv2.addWeighted(
-            mask_overlay, 0.6, mask_colored, 0.4, 0
-        )[mask_bool]
+        # Smooth and convert contours to polygons
+        mask_polygons = []
+        for contour in contours:
+            if contour.shape[0] < 5:
+                continue
+            contour = contour.reshape(-1, 2)
+            smoothed_contour = smooth_contour(contour, window_size=15)
+            if smoothed_contour.shape[0] >= 3:
+                polygon = Polygon(smoothed_contour)
+                if not polygon.is_valid or polygon.area == 0:
+                    polygon = polygon.buffer(0)
+                    if not polygon.is_valid or polygon.area == 0:
+                        continue
+                mask_polygons.append({'area': polygon.area, 'polygon': polygon})
 
-        # Update the annotated image with overlay applied only on masked area
-        st.session_state["annotated_image"] = mask_overlay
+        # Filter out overly large polygons
+        max_area_threshold = 0.1 * image_area
+        mask_polygons = [mp for mp in mask_polygons if mp['area'] < max_area_threshold]
 
-        # Store the mask with its label
+        mask_polygons.sort(key=lambda x: x['area'], reverse=True)
+
+        def is_polygon_mostly_within(poly, existing_polys, area_overlap_threshold=0.95):
+            for existing_poly in existing_polys:
+                intersection_area = poly.intersection(existing_poly).area
+                if poly.area == 0:
+                    continue
+                overlap_ratio = intersection_area / poly.area
+                if overlap_ratio >= area_overlap_threshold:
+                    return True
+            return False
+
+        filtered_polygons = []
+        for poly_dict in mask_polygons:
+            poly = poly_dict['polygon']
+            if not is_polygon_mostly_within(poly, [d['polygon'] for d in filtered_polygons], area_overlap_threshold=0.05):
+                filtered_polygons.append(poly_dict)
+
+        # Draw polygons on the annotated image
+        annotated_image = st.session_state["annotated_image"].copy()
+        for poly_dict in filtered_polygons:
+            poly = poly_dict['polygon']
+            if isinstance(poly, Polygon):
+                coords = np.array(list(poly.exterior.coords)).astype(np.int32)
+                cv2.polylines(annotated_image, [coords], isClosed=True, color=(0, 255, 0), thickness=1)
+            elif isinstance(poly, MultiPolygon):
+                for sub_poly in poly.geoms:
+                    if sub_poly.is_valid and not sub_poly.is_empty:
+                        coords = np.array(list(sub_poly.exterior.coords)).astype(np.int32)
+                        cv2.polylines(annotated_image, [coords], isClosed=True, color=(0, 255, 0), thickness=1)
+
+        # Update session state
+        st.session_state["annotated_image"] = annotated_image
+        # Store the mask and label as before
         st.session_state["masks_list"].append({
             "mask": mask_resized,
             "label": selected_label
         })
 
-    # Display the updated annotated image
     st.image(st.session_state["annotated_image"], channels="BGR")
 else:
     st.error("Could not load the image. Please check the file path.")
