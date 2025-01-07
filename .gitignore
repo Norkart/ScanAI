@@ -1,4 +1,9 @@
 /datasets
+/dataset
+/dataset_with_jgw
 *.pt
 *.pth
 .dev_secret
+temp
+dataset*
+temp*
