@@ -156,62 +156,14 @@ def pixel_to_world(px, py, A, B, C, D, E, F):
     Y = D*px + E*py + F
     return (X, Y)
 
-def load_image_and_transform(path):
-    ext = os.path.splitext(path)[1].lower()
-    if ext == ".jpg":
-        jgw_path = os.path.splitext(path)[0] + ".jgw"
-        if not os.path.exists(jgw_path):
-            print(f"No .jgw for {path}, skipping.")
-            return None, None
-        img = cv2.imread(path)
-        if img is None:
-            print(f"Could not read {path}, skipping.")
-            return None, None
-        try:
-            A,B,C,D,E,F = read_jgw(jgw_path)
-        except:
-            print(f"Failed reading {jgw_path}")
-            return None, None
-        return img,(A,B,C,D,E,F)
-    elif ext == ".tif":
-        try:
-            import rasterio
-            with rasterio.open(path) as ds:
-                if ds.crs is None or str(ds.crs)!="EPSG:25832":
-                    print(f"{path} is not EPSG:25832.")
-                    return None, None
-                data = ds.read()
-                bc = min(data.shape[0],3)
-                arr = np.transpose(data[:bc,:,:], (1,2,0)).astype(np.uint8)
-                if bc==1:
-                    arr=cv2.merge([arr[:,:,0],arr[:,:,0],arr[:,:,0]])
-                elif bc==2:
-                    arr=cv2.merge([arr[:,:,0],arr[:,:,1],arr[:,:,1]])
-                if bc>=3:
-                    arr=cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-                aff=ds.transform
-                A=aff.a
-                B=aff.b
-                C=aff.xoff
-                D=aff.d
-                E=aff.e
-                F=aff.yoff
-                return arr,(A,B,C,D,E,F)
-        except Exception as e:
-            print(f"Could not open {path} with rasterio: {e}")
-            return None,None
-    else:
-        print(f"Unsupported extension for {path}")
-        return None,None
-
 # We want to define how to crop each mask region for analysis
 def crop_mask_region(image_bgr, mask_2d):
     """
-    1) Get bounding box of 'mask_2d'.
-    2) Create sub-image. Blank out everything outside the polygon => black/white.
-    3) Return the sub-image as bytes (JPEG in memory) or None if empty.
+    1) Identify the bounding box of 'mask_2d'.
+    2) Create a sub-image, blank out everything outside the mask (white).
+    3) Return sub-image as in-memory JPEG bytes or None if out of valid dimension range.
     """
-    #  mask_2d shape => (H, W), same as image_bgr
+
     coords = np.where(mask_2d > 0)
     if coords[0].size == 0:
         return None
@@ -219,22 +171,23 @@ def crop_mask_region(image_bgr, mask_2d):
     min_y, max_y = coords[0].min(), coords[0].max()
     min_x, max_x = coords[1].min(), coords[1].max()
 
-    # Crop bounding box
     sub_img = image_bgr[min_y:max_y+1, min_x:max_x+1].copy()
 
-    # Create a local mask for the bounding box
-    # local_mask => same shape as sub_img
+    # Dimension check
+    # Skip if outside Azure Vision’s valid range: 50px <= dimension <= 16000px
+    h, w = sub_img.shape[:2]
+    if h < 50 or w < 50 or h > 16000 or w > 16000:
+        return None
+
     local_mask = np.zeros(sub_img.shape[:2], dtype=np.uint8)
-    # Shift coords to sub-box origin
     shifted_y = coords[0] - min_y
     shifted_x = coords[1] - min_x
     local_mask[shifted_y, shifted_x] = 255
 
-    # Optionally blank out everything outside the mask
-    # e.g. set outside to white or black => demonstration uses white
-    sub_img[local_mask == 0] = (255,255,255)
+    # blank out outside
+    sub_img[local_mask == 0] = (255, 255, 255)
 
-    # Convert sub_img to bytes (JPEG) in memory
+    # Encode to bytes
     try:
         is_success, buffer = cv2.imencode(".jpg", sub_img)
         if not is_success:
@@ -243,47 +196,44 @@ def crop_mask_region(image_bgr, mask_2d):
     except:
         return None
 
+
 def analyze_mask_polygon(polygon_dict, image_bgr):
     """
-    1) Crop region
-    2) Call vision_client.analyze(...)
-    3) Parse recognized text from result, return it
+    1) Crop sub-image from mask.
+    2) Skip if too small/large or if we fail to encode.
+    3) Call Azure Vision with 'READ' to get text.
     """
     seg_mask = polygon_dict['mask']
-    # Crop => get image_data bytes
     image_data = crop_mask_region(image_bgr, seg_mask)
     if image_data is None:
-        return ""  # no text
+        # dimension out of range or no sub-image
+        return ""
 
-    # Choose which visual features to analyze
     visual_features = [
-        VisualFeatures.TAGS,
-        VisualFeatures.OBJECTS,
-        VisualFeatures.CAPTION,
-        VisualFeatures.DENSE_CAPTIONS,
-        VisualFeatures.READ,
-        VisualFeatures.SMART_CROPS,
-        VisualFeatures.PEOPLE,
+        VisualFeatures.READ
     ]
 
     try:
         result = vision_client.analyze(
             image_data=image_data,
             visual_features=visual_features,
-            gender_neutral_caption=True,  
+            # you can omit 'gender_neutral_caption' if only using READ
             language="en"
         )
     except Exception as e:
         print(f"Azure Vision analyze error: {e}")
         return ""
 
-    # Extract recognized text from result
-    # E.g. if using `READ` => result.read_result
+    # If region doesn't produce read_result, skip
     found_texts = []
-    if result.read_result is not None and result.read_result.lines:
-        for line in result.read_result.lines:
-            found_texts.append(line.content)
-    # Combine lines
+    if result.read and result.read.blocks:
+        # Loop through each block
+        for block in result.read.blocks:
+            # Then loop through each line in that block
+            if block.lines:
+                for line in block.lines:
+                    # Append just the textual content
+                    found_texts.append(line.text)
     return "\n".join(found_texts)
 
 # ------------------------------------------------------------------------------
@@ -556,7 +506,7 @@ def segment_and_generate_geojson_unified(
         for c_hex,fut in gpt_futs.items():
             color_to_area[c_hex]=fut.result()
 
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         # submit for each polygon
         vision_futs = [
             executor.submit(analyze_mask_polygon, p, original_image_bgr)
@@ -881,11 +831,23 @@ if __name__=="__main__":
         processed_count[item.image_type] += 1
 
     
-    print("\n=== Processing Summary ===")
-    print(f"Number of JPG with coordinates (JGW) processed: {processed_count['jpg_jgw']}")
-    print(f"Number of normal JPG (no coords) processed:     {processed_count['jpg_no_jgw']}")
-    print(f"Number of valid TIF (EPSG:25832) processed:     {processed_count['tif_ok']}")
-    print(f"Number of invalid TIF (no coords) processed:    {processed_count['tif_bad']}")
-    print(f"Number of PDF processed:                        {processed_count['pdf']}")
-    print(f"Number of PNG processed:                        {processed_count['png']}")
-    print("All done!")
+    summary_text = (
+        "=== Processing Summary ===\n"
+        f"Number of JPG with coordinates (JGW) processed: {processed_count['jpg_jgw']}\n"
+        f"Number of normal JPG (no coords) processed:     {processed_count['jpg_no_jgw']}\n"
+        f"Number of valid TIF (EPSG:25832) processed:     {processed_count['tif_ok']}\n"
+        f"Number of invalid TIF (no coords) processed:    {processed_count['tif_bad']}\n"
+        f"Number of PDF processed:                        {processed_count['pdf']}\n"
+        f"Number of PNG processed:                        {processed_count['png']}\n"
+        "All done!\n"
+    )
+    
+    # Print to console
+    print("\n", summary_text)
+    
+    # Also write to file
+    output_summary_path = os.path.join(output_folder, "processing_summary.txt")
+    with open(output_summary_path, 'w', encoding='utf-8') as f:
+        f.write(summary_text)
+
+    print(f"Summary written to {output_summary_path}")
