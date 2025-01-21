@@ -19,6 +19,10 @@ from azure.ai.vision.imageanalysis import ImageAnalysisClient
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.vision.imageanalysis.models import VisualFeatures
 import re
+from concurrent.futures import ThreadPoolExecutor
+import sys
+from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+
 
 # Azure GPT-4 Vision
 # Please fill in these with your actual credentials:
@@ -42,7 +46,6 @@ vision_client = ImageAnalysisClient(
     endpoint=endpoint,
     credential=AzureKeyCredential(key)
 )
-
 # ------------------------------------------------------------------------------
 # 1) PDF -> base64 for GPT-4 Vision
 # ------------------------------------------------------------------------------
@@ -72,7 +75,6 @@ def pdf_to_jpg_base64(pdf_path, output_file="enhanced_image.jpg", contrast_facto
         return base64_image
 
     except Exception as e:
-        print(f"pdf_to_jpg_base64() error: {e}")
         return None
 
 # ------------------------------------------------------------------------------
@@ -86,8 +88,7 @@ def gpt4_get_area_name_from_hex(pdf_path, hex_color):
     """
     pdf_b64 = pdf_to_jpg_base64(pdf_path)
     if not pdf_b64:
-        #print(f"Could not convert {pdf_path} to base64 image.")
-        return "Unknown"
+        return "Unknown - No legend provided"
 
     prompt_text = (
         f"You are given a legend in the attached image, and the user has provided the color {hex_color}. "
@@ -129,7 +130,8 @@ def gpt4_get_area_name_from_hex(pdf_path, hex_color):
         area_name = response.choices[0].message.content.strip()
         return area_name
     except Exception as e:
-        return "Unknown"
+        print("GPT ERROR", e)
+        return "Unknown - GPT api error"
 
 # ------------------------------------------------------------------------------
 # 3) JGW + TIF loading
@@ -155,6 +157,7 @@ def pixel_to_world(px, py, A, B, C, D, E, F):
     X = A*px + B*py + C
     Y = D*px + E*py + F
     return (X, Y)
+
 
 # We want to define how to crop each mask region for analysis
 def crop_mask_region(image_bgr, mask_2d):
@@ -235,6 +238,7 @@ def analyze_mask_polygon(polygon_dict, image_bgr):
                     # Append just the textual content
                     found_texts.append(line.text)
     return "\n".join(found_texts)
+
 
 # ------------------------------------------------------------------------------
 # 5) The main pipeline
@@ -411,9 +415,6 @@ def segment_and_generate_geojson_unified(
         E = 1.0
         F = 0.0
 
-    # PART 1: compute "dominant color" with pixel merging
-    from concurrent.futures import ThreadPoolExecutor
-
     def cluster_pixel(b, step=4):
         """
         Round b to nearest multiple of 'step'.
@@ -520,19 +521,50 @@ def segment_and_generate_geojson_unified(
         final_list[i]['text_found'] = txt
 
     # Convert polygons -> world coords
-    def polygon_to_world_coords(poly, A,B,C,D,E,F):
-        ext=[]
-        for px,py in poly.exterior.coords:
-            xw,yw = pixel_to_world(px,py,A,B,C,D,E,F)
-            ext.append((xw,yw))
-        ints=[]
-        for it in poly.interiors:
-            hole=[]
-            for (px2,py2) in it.coords:
-                x2,y2=pixel_to_world(px2,py2,A,B,C,D,E,F)
-                hole.append((x2,y2))
-            ints.append(hole)
-        return Polygon(ext, ints)
+    def polygon_to_world_coords(geom, A, B, C, D, E, F):
+        if isinstance(geom, Polygon):
+            exterior_coords = []
+            for px, py in geom.exterior.coords:
+                xw, yw = pixel_to_world(px, py, A, B, C, D, E, F)
+                exterior_coords.append((xw, yw))
+    
+            interior_list = []
+            for interior in geom.interiors:
+                hole = []
+                for px2, py2 in interior.coords:
+                    x2, y2 = pixel_to_world(px2, py2, A, B, C, D, E, F)
+                    hole.append((x2, y2))
+                interior_list.append(hole)
+    
+            return Polygon(exterior_coords, interior_list)
+    
+        elif isinstance(geom, MultiPolygon):
+            new_subpolys = []
+            for subpoly in geom.geoms:
+                # Convert each sub-polygon's exterior
+                exterior_coords = []
+                for px, py in subpoly.exterior.coords:
+                    xw, yw = pixel_to_world(px, py, A, B, C, D, E, F)
+                    exterior_coords.append((xw, yw))
+    
+                # Convert interiors
+                interior_list = []
+                for interior in subpoly.interiors:
+                    hole = []
+                    for px2, py2 in interior.coords:
+                        x2, y2 = pixel_to_world(px2, py2, A, B, C, D, E, F)
+                        hole.append((x2, y2))
+                    interior_list.append(hole)
+    
+                poly_converted = Polygon(exterior_coords, interior_list)
+                # Keep only valid, non-empty polygons
+                if poly_converted.is_valid and not poly_converted.is_empty:
+                    new_subpolys.append(poly_converted)
+    
+            return MultiPolygon(new_subpolys) if new_subpolys else MultiPolygon()
+    
+        else:
+            return geom
 
     features=[]
     for p in final_list:
@@ -557,7 +589,7 @@ def segment_and_generate_geojson_unified(
     with open(out_geojson,'w',encoding='utf-8') as f:
         geojson.dump(fc,f,indent=2,ensure_ascii=False)
 
-    print(f"Saved {len(features)} polygons to {out_geojson}, each with GPT-4 area names.")
+    print(f"Saved {len(features)} polygons to {out_geojson}.")
     print("Done with", input_basename)
 
 
@@ -754,8 +786,6 @@ def find_all_supported_images(root_dir):
     return results
 
 if __name__=="__main__":
-    import sys
-    from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 
     # bfloat16 for entire script
     torch.autocast(device_type="cuda", dtype=torch.float16).__enter__()
@@ -769,7 +799,7 @@ if __name__=="__main__":
     mask_generator=SAM2AutomaticMaskGenerator.from_pretrained(
         model_id="facebook/sam2-hiera-large",
         points_per_side=32,
-        points_per_batch=32,
+        points_per_batch=4,
         pred_iou_thresh=0.7,
         stability_score_thresh=0.7,
         stability_score_offset=1.0,
@@ -788,11 +818,14 @@ if __name__=="__main__":
     print("Model init done.")
 
     # Provide your dataset root
-    root_dir="dataset_with_jgw/aalesund/FOKUS"
-    output_folder="geojson_outputs/aalesund"
+    
+    root_dir="dataset_with_jgw/aalesund"
+    output_folder="main_segmentation_outputs/aalesund"
     os.makedirs(output_folder, exist_ok=True)
 
     all_imgs = find_all_supported_images(root_dir)
+
+    print("All supported images found.")
 
     processed_count = {
         "jpg_jgw": 0,
@@ -814,7 +847,7 @@ if __name__=="__main__":
         image_bgr = item.image_bgr
         transform_params = item.transform_params
     
-        # If either is None, we skip
+        # If image is None, we skip
         if image_bgr is None:
             continue
     
@@ -829,6 +862,7 @@ if __name__=="__main__":
         )
 
         processed_count[item.image_type] += 1
+    
 
     
     summary_text = (
