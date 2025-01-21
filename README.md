@@ -148,9 +148,85 @@ Overall, Azure AI Vision is a promising tool for text extraction tasks, particul
 
 A critical discussion point is determining what level of segmentation accuracy is "good enough." While automatic segmentation is promising, achieving ideal results may require fine-tuning with a custom, annotated dataset, which could demand significant resources.
 
-## Next Steps
+# Main Segmentation Pipeline
 
-- **Georeferencing**: Testing segmentation methods with georeferenced maps to assess applicability in real-world spatial contexts.
-- **Refinement**: Exploring annotated datasets and fine-tuning to further enhance model performance.
+## Overview
 
-Extract all the area names and their associated colors. Give me the color code for each color both in RGB and hex.
+This repository contains a **segmentation pipeline** that automates a series of tasks on a dataset of georeferenced images. The pipeline:
+
+1. **Discovers images** (JPEG, TIFF, PDF, PNG) in a specified dataset directory.
+2. **Loads** each image and, if available, **extracts** georeferencing data (e.g., `.jgw` files for `.jpg`, or checking EPSG:25832 for `.tif`).
+3. **Runs** the **Segment Anything 2 (SAM2)** model to automatically generate segmentation masks.
+4. **Extracts polygons** for each mask (using OpenCV + Shapely), **filters** invalid or uninteresting masks, and **draws** these polygons on the image.
+5. **Determines** a “dominant color” for each mask region by **clustering pixel values**, ignoring small variations.
+6. **Calls** GPT-4 Vision (using a PDF legend) to guess an “area name” that matches each mask’s color.
+7. **Analyzes** each mask region with **Azure Vision**, extracting text found inside it (e.g., via `READ` feature).
+8. **Writes** the polygons and associated data (color, area name, recognized text) to a **GeoJSON** file, transforming pixel coordinates to real-world coordinates if available.
+
+## Key Steps
+
+1. **Finding and Loading Images**  
+   - Uses `find_all_supported_images(root_dir)` to scan for files in supported formats (`.jpg`, `.tif`, `.pdf`, `.png`).
+   - Each discovered file is represented by an `ImageItem` class containing:
+     - `path` (the file’s location)
+     - `image_type` (e.g. `"jpg_jgw"`, `"jpg_no_jgw"`, `"tif_ok"`, `"tif_bad"`, `"pdf"`, `"png"`)
+     - `image_bgr` (the loaded OpenCV image in BGR format)
+     - `transform_params` (`(A,B,C,D,E,F)` tuple if georeferencing is known, else `None`)
+
+2. **Segmentation with SAM2**  
+   - For each image, the pipeline calls `segment_and_generate_geojson_unified`:
+     1. Generates masks via **Segment Anything 2** (SAM2).
+     2. Filters large or nested masks.
+     3. Converts masks to polygons, draws them in `<basename>_drawn.jpg` for visualization.
+
+3. **Color Classification + GPT-4 Legend Matching**  
+   - Clusters pixels in each mask region to find a “dominant color,” skipping grayish pixels if a colorful cluster is present.
+   - Calls GPT-4 Vision (given a PDF “tegnforklaring” in the same folder) to guess an **`area_name`** for that color.
+
+4. **Azure Vision**  
+   - Crops each mask region from the original image.
+   - Sends the cropped image bytes to **Azure Vision** (`ImageAnalysisClient`) to detect text or objects.
+   - Saves recognized text lines in `"text_found"` property.
+
+5. **GeoJSON Creation**  
+   - If real georeferencing exists (`transform_params != None`), each polygon is **transformed** from pixel to world coordinates.
+   - Otherwise, an identity transform is used (so polygons are stored in pixel space).
+   - Outputs to `<basename>_masks.geojson`, including `"color"`, `"area_name"`, and `"text_found"` for each polygon.
+
+## Usage
+
+1. **Set Credentials**  
+   - Provide your **AzureOpenAI** keys and **Vision** endpoint/key in the script:
+     ```python
+     api_key = "ENTER GPT API KEY"
+     endpoint = "ENTER IMAGE ANALYSIS ENDPOINT"
+     key = "ENTER IMAGE ANALYSIS CLIENT KEY"
+     ```
+2. **Install Dependencies**  
+   - Required packages include:  
+     ```
+     pymupdf,
+     opencv-python,
+     numpy,
+     torch,
+     rasterio,
+     shapely,
+     azure-ai-vision,
+     ...
+     ```
+3. **Run the Script**  
+   - Adjust `root_dir` to point to your dataset (e.g., `"dataset_with_jgw/aalesund/FOKUS"`)
+   - Adjust `output_folder` as desired (e.g., `geojson_outputs/aalesund`).
+   - Invoke the script: `python sam2_segmentation_pipeline.py`
+4. **Outputs**  
+   - For each image, you get:
+     - **`<basename>_drawn.jpg`**: The image with drawn polygons.
+     - **`<basename>_masks.geojson`**: Mask polygons and properties.
+
+## Notes and Caveats
+
+- If a TIFF file lacks CRS or uses something other than EPSG:25832, it is labeled `"tif_bad"` and assigned no real transform.
+- If a JPEG lacks `.jgw`, it is `"jpg_no_jgw"`.
+- GPT-4 Vision calls rely on a PDF “tegnforklaring” matching the image’s base name plus `_tegnforklaring.pdf`.
+- Azure Vision calls can be **slow** or fail with network issues. Recognized text is stored as `"text_found"`.
+- If no transform is found, polygons are written in pixel coordinates using an **identity** transform `(A=1, E=1)`.
