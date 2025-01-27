@@ -49,25 +49,32 @@ vision_client = ImageAnalysisClient(
 # ------------------------------------------------------------------------------
 # 1) PDF -> base64 for GPT-4 Vision
 # ------------------------------------------------------------------------------
-def pdf_to_jpg_base64(pdf_path, output_file="enhanced_image.jpg", contrast_factor=1.5):
+def image_to_base64(file_path, output_format="JPEG"):
     """
-    Convert the first page of a PDF to a JPG, enhance its contrast, save it to a file,
-    and return the base64-encoded string. Returns None on failure.
+    Convert an image or the first page of a PDF to a base64-encoded string.
+    Supports PDF, JPG, PNG, and TIF formats.
+    
+    Parameters:
+        file_path (str): Path to the file.
+        output_format (str): Desired output image format, default is "JPEG".
+    
+    Returns:
+        str: Base64-encoded image string, or None on failure.
     """
     try:
-        # Open the PDF document
-        pdf_document = fitz.open(pdf_path)
+        if file_path.lower().endswith(".pdf"):
+            # Handle PDF: Render the first page
+            pdf_document = fitz.open(file_path)
+            page = pdf_document[0]  # First page (index 0)
+            pixmap = page.get_pixmap()
+            image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+        else:
+            # Handle images: Open with PIL
+            image = Image.open(file_path)
 
-        # Render the first page
-        page = pdf_document[0]  # First page (index 0)
-        pixmap = page.get_pixmap()
-
-        # Convert pixmap to an image using PIL
-        image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
-
-        # Save the enhanced image to a BytesIO buffer
+        # Save the image to a BytesIO buffer
         buf = io.BytesIO()
-        image.save(buf, format="JPEG")
+        image.save(buf, format=output_format)
         buf.seek(0)
 
         # Encode the image as base64
@@ -86,8 +93,8 @@ def gpt4_get_area_name_from_hex(pdf_path, hex_color):
     2) Prompt GPT-4 Vision with color + PDF
     3) Return a single area name
     """
-    pdf_b64 = pdf_to_jpg_base64(pdf_path)
-    if not pdf_b64:
+    image_b64 = image_to_base64(pdf_path)
+    if not image_b64:
         return "Unknown - No legend provided"
 
     prompt_text = (
@@ -119,7 +126,7 @@ def gpt4_get_area_name_from_hex(pdf_path, hex_color):
                         {"type": "text", "text": prompt_text},
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{pdf_b64}"}
+                            "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
                         }
                     ]
                 }
@@ -333,11 +340,11 @@ def segment_and_generate_geojson_unified(
     h, w = original_image_bgr.shape[:2]
     image_area = h*w
     filtered_masks = [(i,m,a,b) for (i,m,a,b) in filtered_masks if a<image_area]
-    filtered_masks = [
-        (i,m,a,b)
-        for (i,m,a,b) in filtered_masks
-        if is_colorful_region(original_image_bgr, m, 0, 0)
-    ]
+    #filtered_masks = [
+    #    (i,m,a,b)
+    #    for (i,m,a,b) in filtered_masks
+    #    if is_colorful_region(original_image_bgr, m, 0, 0)
+    #]
     final_sam = [sam_result[i] for (i,_,_,_) in filtered_masks]
     print(f"{input_basename}: total masks after filtering = {len(final_sam)}")
 
@@ -415,6 +422,9 @@ def segment_and_generate_geojson_unified(
         E = 1.0
         F = 0.0
 
+    # PART 1: compute "dominant color" with pixel merging
+    from concurrent.futures import ThreadPoolExecutor
+
     def cluster_pixel(b, step=4):
         """
         Round b to nearest multiple of 'step'.
@@ -491,13 +501,29 @@ def segment_and_generate_geojson_unified(
 
     # PART 2: GPT calls for unique colors
     unique_colors=set(p['color_hex'] for p in final_list)
-    pdf_tegn=os.path.splitext(os.path.basename(original_path))[0]+"_tegnforklaring.pdf"
-    pdf_path=os.path.join(os.path.dirname(original_path),pdf_tegn)
+    base = os.path.splitext(os.path.basename(original_path))[0]  # e.g. "0203_plankart_tegnforklaring"
+    
+    # Remove "_plankart" (case-insensitive) from that base
+    base_no_plankart = re.sub(r" Plankart", "", base, flags=re.IGNORECASE)
+    # Then add "_tegnforklaring"
+    final_base = base_no_plankart + " Tegnforklaring"
+    
+    dir_name = os.path.dirname(original_path)
+    
+    # We'll try four possible extensions
+    possible_exts = [".pdf", ".jpg", ".png", ".tif"]
+    
+    tegnforklaring_path = None
+    for ext in possible_exts:
+        candidate = os.path.join(dir_name, final_base + ext)
+        if os.path.exists(candidate):
+            tegnforklaring_path = candidate
+            break
 
     color_to_area={}
 
     def gpt_area_task(c_hex):
-        return gpt4_get_area_name_from_hex(pdf_path, c_hex)
+        return gpt4_get_area_name_from_hex(tegnforklaring_path, c_hex)
 
     with ThreadPoolExecutor() as executor:
         gpt_futs={
@@ -596,6 +622,7 @@ def segment_and_generate_geojson_unified(
 # ------------------------------------------------------------------------------
 # 7) The main driver
 # ------------------------------------------------------------------------------
+import re
 class ImageItem:
     """
     Holds:
@@ -650,7 +677,7 @@ def load_image_tif(full_path):
                 arr=cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
             
             # Check CRS
-            if ds.crs and str(ds.crs)=="EPSG:25832":
+            if ds.crs:
                 A=ds.transform.a
                 B=ds.transform.b
                 C=ds.transform.xoff
@@ -676,6 +703,7 @@ def load_image_pdf(full_path):
         np_img = np.array(Image.frombytes("RGB",(pix.width,pix.height),pix.samples))[:,:,::-1]
         return np_img,None
     except:
+        print("ERROR")
         return None,None
 
 def load_image_png(full_path):
@@ -786,6 +814,8 @@ def find_all_supported_images(root_dir):
     return results
 
 if __name__=="__main__":
+    import sys
+    from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 
     # bfloat16 for entire script
     torch.autocast(device_type="cuda", dtype=torch.float16).__enter__()
@@ -819,8 +849,8 @@ if __name__=="__main__":
 
     # Provide your dataset root
     
-    root_dir="dataset_with_jgw/aalesund"
-    output_folder="main_segmentation_outputs/aalesund"
+    root_dir="dataset_with_jgw/kristiansund/Scan"
+    output_folder="main_segmentation_outputs/kristiansund"
     os.makedirs(output_folder, exist_ok=True)
 
     all_imgs = find_all_supported_images(root_dir)
@@ -835,19 +865,19 @@ if __name__=="__main__":
         "pdf": 0,
         "png": 0
     }
+    
+    output_summary_path = os.path.join(output_folder, "processing_summary.txt")
 
     for item in all_imgs:
         if ".ipynb_checkpoint" in item.path.lower():
             continue
-
+    
         base_name = os.path.splitext(os.path.basename(item.path))[0]
         print(f"\n[Processing] {item.path}")
     
-        # Pull the loaded image data and transform (if any) from the ImageItem
         image_bgr = item.image_bgr
         transform_params = item.transform_params
     
-        # If image is None, we skip
         if image_bgr is None:
             continue
     
@@ -860,28 +890,25 @@ if __name__=="__main__":
             original_path=item.path,
             color_snap_threshold=5.0
         )
-
+    
         processed_count[item.image_type] += 1
     
-
+        # Build updated summary text
+        summary_text = (
+            "=== Current Processing Summary ===\n"
+            f"Number of JPG with coordinates (JGW) processed: {processed_count['jpg_jgw']}\n"
+            f"Number of normal JPG (no coords) processed:     {processed_count['jpg_no_jgw']}\n"
+            f"Number of valid TIF (EPSG:25832) processed:     {processed_count['tif_ok']}\n"
+            f"Number of invalid TIF (no coords) processed:    {processed_count['tif_bad']}\n"
+            f"Number of PDF processed:                        {processed_count['pdf']}\n"
+            f"Number of PNG processed:                        {processed_count['png']}\n"
+            "\n"
+            "The file is updated after each image!\n"
+        )
     
-    summary_text = (
-        "=== Processing Summary ===\n"
-        f"Number of JPG with coordinates (JGW) processed: {processed_count['jpg_jgw']}\n"
-        f"Number of normal JPG (no coords) processed:     {processed_count['jpg_no_jgw']}\n"
-        f"Number of valid TIF (EPSG:25832) processed:     {processed_count['tif_ok']}\n"
-        f"Number of invalid TIF (no coords) processed:    {processed_count['tif_bad']}\n"
-        f"Number of PDF processed:                        {processed_count['pdf']}\n"
-        f"Number of PNG processed:                        {processed_count['png']}\n"
-        "All done!\n"
-    )
+        # Write new summary to file, overwriting previous content
+        with open(output_summary_path, 'w', encoding='utf-8') as f:
+            f.write(summary_text)
     
-    # Print to console
-    print("\n", summary_text)
-    
-    # Also write to file
-    output_summary_path = os.path.join(output_folder, "processing_summary.txt")
-    with open(output_summary_path, 'w', encoding='utf-8') as f:
-        f.write(summary_text)
-
-    print(f"Summary written to {output_summary_path}")
+    # At the very end, you might print or append a final 'All done' line
+    print("All done!")
