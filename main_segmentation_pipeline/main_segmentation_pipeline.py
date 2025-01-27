@@ -504,9 +504,9 @@ def segment_and_generate_geojson_unified(
     base = os.path.splitext(os.path.basename(original_path))[0]  # e.g. "0203_plankart_tegnforklaring"
     
     # Remove "_plankart" (case-insensitive) from that base
-    base_no_plankart = re.sub(r" Plankart", "", base, flags=re.IGNORECASE)
+    base_no_plankart = re.sub(r"_plankart", "", base, flags=re.IGNORECASE)
     # Then add "_tegnforklaring"
-    final_base = base_no_plankart + " Tegnforklaring"
+    final_base = base_no_plankart + "_tegnforklaring"
     
     dir_name = os.path.dirname(original_path)
     
