@@ -182,6 +182,7 @@ This repository contains a **segmentation pipeline** that automates a series of 
 3. **Color Classification + GPT-4 Legend Matching**  
    - Clusters pixels in each mask region to find a “dominant color,” skipping grayish pixels if a colorful cluster is present.
    - Calls GPT-4 Vision (given a PDF “tegnforklaring” in the same folder) to guess an **`area_name`** for that color.
+   - Note for legend matching to work the dataset needs a map image (i.e. 200.jpg) and a corresponding tegnforklaring image (i.e. 200_tegnforklaring.jpg)
 
 4. **Azure Vision**  
    - Crops each mask region from the original image.
