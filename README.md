@@ -226,7 +226,7 @@ This repository contains a **segmentation pipeline** that automates a series of 
 
 ## Notes and Caveats
 
-- If a TIFF file lacks CRS or uses something other than EPSG:25832, it is labeled `"tif_bad"` and assigned no real transform.
+- If a TIFF file lacks CRS it is labeled `"tif_bad"` and assigned no real transform.
 - If a JPEG lacks `.jgw`, it is `"jpg_no_jgw"`.
 - GPT-4 Vision calls rely on a PDF “tegnforklaring” matching the image’s base name plus `_tegnforklaring.pdf`.
 - Azure Vision calls can be **slow** or fail with network issues. Recognized text is stored as `"text_found"`.
